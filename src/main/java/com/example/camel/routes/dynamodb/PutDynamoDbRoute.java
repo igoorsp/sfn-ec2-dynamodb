@@ -6,6 +6,7 @@ import org.apache.camel.component.aws2.ddb.Ddb2Operations;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValueUpdate;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -15,37 +16,47 @@ public class PutDynamoDbRoute extends RouteBuilder {
 
     private static final String STATUS = "status";
     private static final String EXECUTION_ID = "executionId";
-    private static final String BUSINESS_KEY = "businessKey";
-    private static final String EXECUTION_START_TIME = "executionStartTime";
-    private static final String TASK_TOKEN = "taskToken";
 
     @Value("${app.dynamodb.table}")
-    String tableName;
+    private String tableName;
 
     @Override
     public void configure() {
 
-        // Implementação do PUT (Inserção de Item no DynamoDB)
-        from("direct:putTask")
-                .log("Inserting new item into DynamoDB: ${body}")
+        from("direct:updateTask")
+                .log("Updating item in DynamoDB with body: ${body}")
                 .process(exchange -> {
                     Map<String, Object> requestBody = exchange.getIn().getBody(Map.class);
 
+                    // Validação dos campos obrigatórios
                     if (!requestBody.containsKey(EXECUTION_ID)) {
                         throw new IllegalArgumentException("executionId is required in the request body");
                     }
+                    if (!requestBody.containsKey(STATUS)) {
+                        throw new IllegalArgumentException("status is required in the request body");
+                    }
 
-                    Map<String, AttributeValue> item = new HashMap<>();
-                    item.put(EXECUTION_ID, AttributeValue.builder().s(requestBody.get(EXECUTION_ID).toString()).build());
-                    item.put(BUSINESS_KEY, AttributeValue.builder().s(requestBody.getOrDefault(BUSINESS_KEY, "").toString()).build());
-                    item.put(EXECUTION_START_TIME, AttributeValue.builder().s(requestBody.getOrDefault(EXECUTION_START_TIME, "").toString()).build());
-                    item.put(STATUS, AttributeValue.builder().s(requestBody.getOrDefault(STATUS, "").toString()).build());
-                    item.put(TASK_TOKEN, AttributeValue.builder().s(requestBody.getOrDefault(TASK_TOKEN, "").toString()).build());
+                    // Define a chave (partition key) do registro
+                    Map<String, AttributeValue> keyMap = new HashMap<>();
+                    keyMap.put(EXECUTION_ID, AttributeValue.builder()
+                            .s(requestBody.get(EXECUTION_ID).toString())
+                            .build());
 
-                    exchange.getIn().setHeader(Ddb2Constants.ITEM, item);
-                    exchange.getIn().setHeader(Ddb2Constants.OPERATION, Ddb2Operations.PutItem);
+                    // Define os valores que serão atualizados
+                    Map<String, AttributeValueUpdate> updateValues = new HashMap<>();
+                    updateValues.put(STATUS, AttributeValueUpdate.builder()
+                            .value(AttributeValue.builder()
+                                    .s(requestBody.get(STATUS).toString())
+                                    .build())
+                            .build());
+
+                    // Configura os headers para a operação de atualização no DynamoDB
+                    exchange.getIn().setHeader(Ddb2Constants.KEY, keyMap); // Chave do item
+                    exchange.getIn().setHeader(Ddb2Constants.OPERATION, Ddb2Operations.UpdateItem); // Operação de atualização
+                    exchange.getIn().setHeader(Ddb2Constants.UPDATE_VALUES, updateValues); // Valores a serem atualizados
                 })
-                .toF("aws2-ddb://%s?amazonDDBClient=#amazonDDBClient", tableName)
-                .setBody(simple("Item inserted successfully"));
+                .toF("aws2-ddb://%s?amazonDDBClient=#amazonDDBClient", tableName) // Envia para o DynamoDB
+                .log("Item updated successfully")
+                .setBody(simple("Item updated successfully")); // Resposta de sucesso
     }
 }
