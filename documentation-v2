@@ -1,0 +1,351 @@
+Documentação Técnica - Aplicação Camel com Integração ao DynamoDB e Step Functions
+Este documento descreve a arquitetura técnica de uma aplicação desenvolvida em Apache Camel que expõe três endpoints REST para interação com dados armazenados em DynamoDB e orquestração com o AWS Step Functions.
+
+Sumário
+Visão Geral da Arquitetura
+Fluxo do Processo
+Modelagem de Dados
+Endpoints e Operações
+GET /tasks
+PUT /tasks
+POST /tasks/decision
+Contrato OpenAPI 3
+Boas Práticas e Considerações
+Visão Geral da Arquitetura
+A aplicação Camel é responsável por prover três endpoints REST para:
+
+Recuperar informações de registros (tasks) de uma tabela no DynamoDB.
+Criar um registro (task) no DynamoDB.
+Atualizar o status de um registro (task) e informar ao Step Functions (via taskToken) o resultado da ação (success ou failure).
+Abaixo temos um diagrama de alto nível que descreve a interação entre os componentes:
+
+pgsql
+Copiar
+Editar
++--------------+        +-------------------+        +-----------------+
+|   Cliente    | --->   | Aplicação Camel  |  --->   |   AWS DynamoDB  |
+| (Front-end)  | <---   |(Rotas/Endpoints) |  <---   |    (Tabela)     |
++--------------+        +-------------------+        +-----------------+
+                             |
+                             |  (Callback)
+                             v
+                        AWS Step Functions
+                             (TaskToken)
+Pontos principais:
+Apache Camel: Faz o roteamento e a coordenação das chamadas REST para persistência no DynamoDB e interação com o Step Functions.
+DynamoDB: Armazena informações referentes às tasks, incluindo:
+businessKey
+executionStartTime
+executionId
+taskToken
+status (PENDING, APPROVED, REJECTED, etc.)
+AWS Step Functions: Orquestra o fluxo de trabalho (workflow). Recebe callbacks via taskToken para dar continuidade na execução.
+Fluxo do Processo
+GET /tasks: O cliente (ou outra aplicação) requisita tasks filtradas por um determinado status (ex.: PENDING).
+A aplicação Camel busca na tabela do DynamoDB as tasks com o status indicado.
+PUT /tasks: É chamada para criar um novo registro de task no DynamoDB, definindo businessKey, executionStartTime, executionId, taskToken e status.
+POST /tasks/decision: Dado um taskToken fornecido no body, a aplicação Camel decide se vai chamar o Step Functions com success ou failure. Paralelamente, a aplicação atualiza o status no DynamoDB para APPROVED ou REJECTED, por exemplo.
+Modelagem de Dados
+Cada registro na tabela do DynamoDB possui as seguintes colunas (atributos):
+
+Partition Key: executionId (por exemplo, pode ser usado como chave primária, dependendo do design)
+Sort Key (opcional): pode ser businessKey ou outro campo que faça sentido na modelagem
+taskToken: chave única para comunicação com Step Functions.
+businessKey: identificador de negócio para correlacionar diferentes partes do processo.
+executionStartTime: data/hora do início da execução (timestamp).
+status: estado atual da task, podendo ser PENDING, APPROVED, REJECTED, ERROR, etc.
+Exemplo de um registro DynamoDB:
+
+json
+Copiar
+Editar
+{
+  "businessKey": "BK12345",
+  "executionStartTime": "2025-02-26T10:00:00Z",
+  "executionId": "exec-001",
+  "taskToken": "abcd1234",
+  "status": "PENDING"
+}
+Endpoints e Operações
+1. GET /tasks
+Descrição
+Recupera uma lista de tasks filtradas pelo parâmetro de query status.
+
+Parâmetros de Query
+status (Obrigatório): Status que se deseja filtrar (e.g. PENDING, APPROVED, REJECTED).
+Exemplo de Requisição
+bash
+Copiar
+Editar
+GET /tasks?status=PENDING
+Respostas
+200 OK: Retorna um array de objetos, cada um representando uma task.
+json
+Copiar
+Editar
+[
+  {
+    "businessKey": "BK12345",
+    "executionStartTime": "2025-02-26T10:00:00Z",
+    "executionId": "exec-001",
+    "taskToken": "abcd1234",
+    "status": "PENDING"
+  },
+  {
+    "businessKey": "BK67890",
+    "executionStartTime": "2025-02-26T10:05:00Z",
+    "executionId": "exec-002",
+    "taskToken": "efgh5678",
+    "status": "PENDING"
+  }
+]
+400 Bad Request: Caso o parâmetro de query status não seja fornecido ou seja inválido.
+500 Internal Server Error: Em caso de erro interno ou falha na comunicação com o DynamoDB.
+2. PUT /tasks
+Descrição
+Cria um novo registro de task na tabela do DynamoDB.
+
+Corpo (Body) da Requisição
+A requisição deve conter um objeto JSON com os seguintes campos:
+
+businessKey (string)
+executionStartTime (string, data/hora em formato ISO 8601)
+executionId (string)
+taskToken (string)
+status (string; valores esperados: PENDING, APPROVED, REJECTED, etc.)
+json
+Copiar
+Editar
+{
+  "businessKey": "BK12345",
+  "executionStartTime": "2025-02-26T10:00:00Z",
+  "executionId": "exec-001",
+  "taskToken": "abcd1234",
+  "status": "PENDING"
+}
+Exemplo de Requisição
+bash
+Copiar
+Editar
+PUT /tasks
+{
+  "businessKey": "BK12345",
+  "executionStartTime": "2025-02-26T10:00:00Z",
+  "executionId": "exec-001",
+  "taskToken": "abcd1234",
+  "status": "PENDING"
+}
+Respostas
+201 Created: Registro criado com sucesso.
+json
+Copiar
+Editar
+{
+  "message": "Task criada com sucesso."
+}
+400 Bad Request: Caso algum campo obrigatório não seja fornecido ou seja inválido.
+409 Conflict: Caso já exista um registro com executionId ou taskToken duplicado (dependendo da definição de unicidade).
+500 Internal Server Error: Em caso de erro interno ou falha na comunicação com o DynamoDB.
+3. POST /tasks/decision
+Descrição
+Realiza a decisão (aprovação ou rejeição) de uma task específica, enviando o callback para o AWS Step Functions via taskToken e atualizando o status no DynamoDB.
+
+Corpo (Body) da Requisição
+taskToken (string) - identificador do Step Functions.
+(Opcional) decision (string) - caso a aplicação precise decidir entre “APPROVED” e “REJECTED” explicitamente.
+Se a decisão for APPROVED, chamar SendTaskSuccess.
+Se a decisão for REJECTED, chamar SendTaskFailure.
+Observação: Em muitos casos, pode-se decidir pelo status com base em regras pré-estabelecidas na aplicação ou no body recebido.
+
+Exemplo:
+
+json
+Copiar
+Editar
+{
+  "taskToken": "abcd1234",
+  "decision": "APPROVED"
+}
+Exemplo de Requisição
+bash
+Copiar
+Editar
+POST /tasks/decision
+{
+  "taskToken": "abcd1234",
+  "decision": "REJECTED"
+}
+Respostas
+200 OK: Decisão aplicada com sucesso, Step Functions informado e DynamoDB atualizado.
+json
+Copiar
+Editar
+{
+  "message": "Decisão aplicada com sucesso.",
+  "status": "REJECTED"
+}
+400 Bad Request: Falta de taskToken ou valor de decision inválido.
+404 Not Found: Caso o taskToken não seja encontrado na tabela.
+500 Internal Server Error: Em caso de erro interno ou falha na comunicação com Step Functions ou DynamoDB.
+Contrato OpenAPI 3
+Abaixo está o exemplo do contrato OpenAPI 3 (em formato YAML) para a aplicação:
+
+yaml
+Copiar
+Editar
+openapi: 3.0.3
+info:
+  title: Aplicação Camel - Integração DynamoDB/StepFunctions
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Servidor local
+
+paths:
+  /tasks:
+    get:
+      summary: Recuperar tasks filtradas pelo status
+      description: Retorna uma lista de tasks do DynamoDB filtradas pelo status fornecido.
+      parameters:
+        - in: query
+          name: status
+          required: true
+          schema:
+            type: string
+          description: Status para filtro. Ex: PENDING, APPROVED, REJECTED
+      responses:
+        '200':
+          description: Lista de tasks retornada com sucesso.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    businessKey:
+                      type: string
+                    executionStartTime:
+                      type: string
+                      format: date-time
+                    executionId:
+                      type: string
+                    taskToken:
+                      type: string
+                    status:
+                      type: string
+        '400':
+          description: Parâmetro de status ausente ou inválido
+        '500':
+          description: Erro interno do servidor
+
+    put:
+      summary: Criar um novo registro de task
+      description: Cria um registro no DynamoDB com as informações fornecidas no corpo da requisição.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - businessKey
+                - executionStartTime
+                - executionId
+                - taskToken
+                - status
+              properties:
+                businessKey:
+                  type: string
+                executionStartTime:
+                  type: string
+                  format: date-time
+                executionId:
+                  type: string
+                taskToken:
+                  type: string
+                status:
+                  type: string
+      responses:
+        '201':
+          description: Task criada com sucesso.
+        '400':
+          description: Dados inválidos no corpo da requisição.
+        '409':
+          description: Conflito de registro (chave duplicada).
+        '500':
+          description: Erro interno do servidor.
+
+  /tasks/decision:
+    post:
+      summary: Decidir (aprovar ou rejeitar) uma task e notificar o Step Functions
+      description: Recebe um taskToken e aplica a decisão, notificando o Step Functions via SendTaskSuccess ou SendTaskFailure.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - taskToken
+              properties:
+                taskToken:
+                  type: string
+                decision:
+                  type: string
+                  enum: [APPROVED, REJECTED]
+      responses:
+        '200':
+          description: Decisão aplicada com sucesso
+        '400':
+          description: Dados inválidos ou falta de taskToken
+        '404':
+          description: taskToken não encontrado
+        '500':
+          description: Erro interno do servidor
+
+components:
+  schemas:
+    Task:
+      type: object
+      properties:
+        businessKey:
+          type: string
+        executionStartTime:
+          type: string
+          format: date-time
+        executionId:
+          type: string
+        taskToken:
+          type: string
+        status:
+          type: string
+Boas Práticas e Considerações
+Validação de Dados:
+
+Validar todos os campos obrigatórios no PUT e POST.
+Garantir que status aceite valores apenas dentro de um conjunto pré-definido.
+Tratamento de Erros:
+
+Diferenciar erros de validação (4xx) de erros internos (5xx).
+Manter logs que auxiliem a rastreabilidade de falhas.
+Segurança:
+
+Acesso controlado ao DynamoDB (via IAM Roles).
+Autenticação e autorização nos endpoints REST (pode incluir OAuth2, API Keys, etc.).
+Escalabilidade:
+
+DynamoDB escalona facilmente, mas é importante projetar as chaves de partição e de ordenação para evitar hot partition.
+Garantir que a aplicação Camel seja dimensionada para lidar com o volume de requisições esperado.
+Observabilidade:
+
+Monitorar métricas de sucesso/falha das rotas Camel.
+Configurar alertas no CloudWatch (ou outra ferramenta) para monitorar filas de Step Functions, latência e throughput do DynamoDB.
+Conclusão
+Este documento apresenta uma visão consolidada da aplicação Camel que integra o AWS DynamoDB para persistência de tasks e o AWS Step Functions para orquestração do fluxo de processo. Com os três endpoints (GET /tasks, PUT /tasks e POST /tasks/decision), é possível:
+
+Consultar tasks pendentes ou em qualquer outro status.
+Criar novas tasks.
+Decidir sobre o desenrolar do fluxo no Step Functions, aprovando ou rejeitando cada task.
+O contrato OpenAPI 3 anexo pode ser usado como fonte de verdade para geração de documentação adicional, bem como para validação automática de chamadas via ferramentas de API Gateway.
+
