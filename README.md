@@ -10,14 +10,9 @@ A aplicação Camel expõe **três endpoints REST**:
 2. **PUT /tasks**: Cria uma nova task no **DynamoDB**.
 3. **POST /tasks/decision**: Envia uma decisão para o **Step Functions** via `taskToken` e atualiza o status no **DynamoDB**.
 
-## **Arquitetura da Solução**
+## **Diagrama**
 
-```mermaid
-graph TD;
-    A[Cliente] -->|GET, PUT, POST| B[Aplicação Camel];
-    B -->|DynamoDB API| C[AWS DynamoDB];
-    B -->|Step Functions API| D[AWS Step Functions];
-```
+![](workflow/ec2-dynamodb-stepfunctions.drawio.png)
 
 ### **Componentes**
 
@@ -101,7 +96,7 @@ PUT /tasks
 
 ---
 
-### **POST /tasks/decision**
+### **POST /tasks/callback**
 
 **Descrição:** Atualiza o status de uma task e envia a decisão ao **Step Functions**.
 
@@ -109,15 +104,16 @@ PUT /tasks
 
 ```json
 {
-  "taskToken": "abcd1234",
-  "decision": "APPROVED"
+  "status": "APPROVED",
+  "executionId":"arn+id",
+  "taskToken":"TASTTOKEN"
 }
 ```
 
 **Exemplo de Chamada:**
 
 ```http
-POST /tasks/decision
+POST /tasks/callback
 ```
 
 **Exemplo de Resposta:**
@@ -209,6 +205,78 @@ components:
           type: string
         status:
           type: string
+```
+
+## **Step Functions**
+
+![](workflow/State-machine.png)
+
+### **Definição da State Machine**
+
+```json
+{
+   "Comment": "Exemplo Step Functions com Callback Pattern e condicionais",
+   "StartAt": "EnviaParaSQS",
+   "States": {
+      "EnviaParaSQS": {
+         "Type": "Task",
+         "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+         "Parameters": {
+            "QueueUrl": "https://sqs.us-east-1.amazonaws.com/AccountID/QueueName",
+            "MessageBody": {
+               "executionId.$": "$$.Execution.Id",
+               "taskToken.$": "$$.Task.Token",
+               "executionStartTime.$": "$$.Execution.StartTime",
+               "businessKey.$": "$.businessKey"
+            }
+         },
+         "Next": "VerificaResultado",
+         "Catch": [
+            {
+               "ErrorEquals": [
+                  "States.TaskFailed"
+               ],
+               "Next": "FalhaCallback"
+            }
+         ],
+         "TimeoutSeconds": 240
+      },
+      "VerificaResultado": {
+         "Type": "Choice",
+         "Choices": [
+            {
+               "Variable": "$.result",
+               "StringEquals": "APPROVED",
+               "Next": "Approved"
+            },
+            {
+               "Variable": "$.result",
+               "StringEquals": "REJECTED",
+               "Next": "Rejected"
+            }
+         ],
+         "Default": "NaoIdentificado"
+      },
+      "Approved": {
+         "Type": "Pass",
+         "Comment": "Trate aqui a lógica de sucesso APPROVED",
+         "End": true
+      },
+      "Rejected": {
+         "Type": "Pass",
+         "Comment": "Trate aqui a lógica de REJECTED",
+         "End": true
+      },
+      "NaoIdentificado": {
+         "Type": "Fail",
+         "Cause": "Retorno não identificado"
+      },
+      "FalhaCallback": {
+         "Type": "Fail",
+         "Cause": "Falha no callback (SendTaskFailure)"
+      }
+   }
+}
 ```
 
 ---
